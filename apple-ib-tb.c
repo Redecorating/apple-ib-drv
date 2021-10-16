@@ -76,6 +76,8 @@
 
 #define APPLETB_MAX_DIM_TIME	30
 
+#define APPLE_MAGIC_KBD_BL_MAX	16
+
 static int appletb_tb_def_idle_timeout = 5 * 60;
 module_param_named(idle_timeout, appletb_tb_def_idle_timeout, int, 0444);
 MODULE_PARM_DESC(idle_timeout, "Default touch bar idle timeout:\n"
@@ -199,6 +201,11 @@ static const struct appletb_key_translation appletb_fn_codes[] = {
 	{ KEY_F12, KEY_VOLUMEUP },
 };
 
+struct apple_magic_backlight {
+	struct led_classdev cdev;
+	struct usb_device dev;
+};
+
 static struct appletb_device *appletb_dev;
 
 static int appletb_send_usb_ctrl(struct appletb_iface_info *iface_info,
@@ -317,6 +324,88 @@ static int appletb_send_hid_report(struct appletb_iface_info *iface_info,
 	kfree(buf);
 
 	return rc;
+}
+
+static int apple_magic_keyboard_backlight_set(struct apple_magic_backlight *backlight, char brightness, char rate)
+{
+	int tries = 0;
+	int rc;
+	void *buf;
+
+	char data[] = { 0x03, brightness,
+		APPLE_MAGIC_KBD_BL_MAX - brightness,
+		rate, 0x00, 0x00 };
+	buf = kmemdup(data, sizeof(data), GFP_KERNEL);
+
+	do {
+		/*
+		 * FIXME: use appletb_send_hid_report, don't hard code all of this
+		 * Need to get apple_tb_send_hid_report to use wIndex=0x01
+		 */
+		rc = usb_control_msg(&backlight->dev,
+			usb_sndctrlpipe(&backlight->dev, 0),
+			HID_REQ_SET_REPORT, USB_DIR_OUT |
+			USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+			0x0303, 0x01, buf, sizeof(data),
+			2000);
+		if (rc != -EPIPE)
+			break;
+
+		usleep_range(1000 << tries, 3000 << tries);
+	} while (++tries < 5);
+
+	return (rc > 0) ? 0 : rc;
+}
+
+static int apple_magic_keyboard_backlight_led_set(struct led_classdev *led_cdev,
+		enum led_brightness brightness)
+{
+	int ret;
+	struct apple_magic_backlight *backlight = container_of(led_cdev,
+			struct apple_magic_backlight, cdev);
+
+	/*
+	 * We can't update the brightness without turning it off and on again.
+	 * We also need to delay a little (13ms isn't enough, but 15ms is).
+	 */
+	ret = apple_magic_keyboard_backlight_set(backlight, 0, 0);
+	if (ret)
+		return ret;
+
+	msleep(15);
+	return apple_magic_keyboard_backlight_set(backlight, brightness, 0);
+}
+
+static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
+{
+	int ret;
+	struct apple_magic_backlight *backlight;
+
+	switch(tb_dev->tpd_handle.dev->id.product) {
+		case 0x0340u: /* MacBookPro16,1/4 */
+		case 0x027eu: /* MacBookPro16,2 */
+		case 0x027fu: /* MacBookPro16,3 */
+		case 0x0280u: /* MacBookAir9,1 */
+			break;
+		default:
+			return 0;
+	}
+
+	backlight = devm_kzalloc(tb_dev->log_dev, sizeof(*backlight), GFP_KERNEL);
+	if (!backlight)
+		return -ENOMEM;
+
+	backlight->dev = *interface_to_usbdev(tb_dev->disp_iface.usb_iface);
+	backlight->cdev.name = "apple::kbd_backlight";
+	backlight->cdev.max_brightness = APPLE_MAGIC_KBD_BL_MAX;
+	backlight->cdev.brightness_set_blocking = apple_magic_keyboard_backlight_led_set;
+
+	ret = apple_magic_keyboard_backlight_set(backlight, 0, 0);
+	if (ret)
+		return ret;
+
+	ret = devm_led_classdev_register(tb_dev->log_dev, &backlight->cdev);
+	return ret;
 }
 
 static int appletb_set_tb_disp(struct appletb_device *tb_dev,
@@ -1225,6 +1314,13 @@ static int appletb_probe(struct hid_device *hdev,
 		}
 
 		dev_dbg(tb_dev->log_dev, "Touchbar activated\n");
+
+
+		rc = apple_magic_keyboard_backlight_init(tb_dev);
+		if (rc) {
+			dev_err(tb_dev->log_dev,
+				"Failed to initialise magic keyboard backlight (%d)\n", rc);
+		}
 	}
 
 	return 0;
