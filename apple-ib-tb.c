@@ -379,7 +379,6 @@ static int apple_magic_keyboard_backlight_set(struct apple_magic_backlight *back
 static int apple_magic_keyboard_backlight_led_set(struct led_classdev *led_cdev,
 		enum led_brightness brightness)
 {
-	int ret;
 	struct apple_magic_backlight *backlight = container_of(led_cdev,
 			struct apple_magic_backlight, cdev);
 
