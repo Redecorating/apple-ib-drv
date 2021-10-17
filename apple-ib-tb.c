@@ -387,6 +387,8 @@ static int apple_magic_keyboard_backlight_led_set(struct led_classdev *led_cdev,
 
 static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
 {
+			dev_err(tb_dev->log_dev,
+				"Enter kbd bl init");
 	int ret;
 	struct apple_magic_backlight *backlight;
 
@@ -395,10 +397,16 @@ static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
 		case 0x027eu: /* MacBookPro16,2 */
 		case 0x027fu: /* MacBookPro16,3 */
 		case 0x0280u: /* MacBookAir9,1 */
+			dev_err(tb_dev->log_dev,
+				"Matched magic keyboard (id: 0x%x)\n", tb_dev->tpd_handle.dev->id.product);
 			break;
 		default:
+			dev_err(tb_dev->log_dev,
+				"No magic keyboard (id: 0x%x)\n", tb_dev->tpd_handle.dev->id.product);
 			return 0;
 	}
+			dev_err(tb_dev->log_dev,
+				"Continuing kbd bl init");
 
 	backlight = devm_kzalloc(tb_dev->log_dev, sizeof(*backlight), GFP_KERNEL);
 	if (!backlight)
@@ -410,8 +418,13 @@ static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
 	backlight->cdev.brightness_set_blocking = apple_magic_keyboard_backlight_led_set;
 
 	ret = apple_magic_keyboard_backlight_set(backlight, 0, 0);
-	if (ret)
+	if (ret) {
+
+			dev_err(tb_dev->log_dev,
+				"failed to test turn off bl");
+			kfree(backlight);
 		return ret;
+	}
 
 	ret = devm_led_classdev_register(tb_dev->log_dev, &backlight->cdev);
 	return ret;
