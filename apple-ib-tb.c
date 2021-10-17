@@ -76,7 +76,7 @@
 
 #define APPLETB_MAX_DIM_TIME	30
 
-#define APPLE_MAGIC_KBD_BL_MAX	16
+#define APPLE_MAGIC_KBD_BL_MAX	60
 
 static int appletb_tb_def_idle_timeout = 5 * 60;
 module_param_named(idle_timeout, appletb_tb_def_idle_timeout, int, 0444);
@@ -206,6 +206,19 @@ struct apple_magic_backlight {
 	struct usb_device dev;
 };
 
+struct apple_magic_keyboard_backlight_report {
+	u8 report_id;	/* 0x01 */
+	u8 mode;	/* If 0x00, brightness can turn off backlight */
+	u8 brightness;
+	u8 override_1;	/* If these are non-zero, backlight is overridden to max brightness */
+	u8 override_2;
+	u8 max;		/* The lower this is, the brighter each brightness value is.
+			 * Only takes affect after turning it off and on again. */
+	u8 rate;
+	u8 magic_1;	/* If these are non-zero, we are ignored. */
+	u8 magic_2;
+};
+
 static struct appletb_device *appletb_dev;
 
 static int appletb_send_usb_ctrl(struct appletb_iface_info *iface_info,
@@ -330,12 +343,17 @@ static int apple_magic_keyboard_backlight_set(struct apple_magic_backlight *back
 {
 	int tries = 0;
 	int rc;
-	void *buf;
+	struct apple_magic_keyboard_backlight_report *rep;
 
-	char data[] = { 0x03, brightness,
-		APPLE_MAGIC_KBD_BL_MAX - brightness,
-		rate, 0x00, 0x00 };
-	buf = kmemdup(data, sizeof(data), GFP_KERNEL);
+	rep = kmalloc(sizeof(*rep), GFP_KERNEL);
+	if (rep == NULL)
+		return -ENOMEM;
+
+	rep->report_id = 0x01;
+	rep->mode = brightness;
+	rep->brightness = brightness;
+	rep->max = 0x5e;
+	rep->rate = rate;
 
 	do {
 		/*
@@ -346,7 +364,7 @@ static int apple_magic_keyboard_backlight_set(struct apple_magic_backlight *back
 			usb_sndctrlpipe(&backlight->dev, 0),
 			HID_REQ_SET_REPORT, USB_DIR_OUT |
 			USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-			0x0303, 0x01, buf, sizeof(data),
+			0x0301, 0x01, rep, sizeof(*rep),
 			2000);
 		if (rc != -EPIPE)
 			break;
@@ -354,6 +372,7 @@ static int apple_magic_keyboard_backlight_set(struct apple_magic_backlight *back
 		usleep_range(1000 << tries, 3000 << tries);
 	} while (++tries < 5);
 
+	kfree(rep);
 	return (rc > 0) ? 0 : rc;
 }
 
@@ -364,16 +383,7 @@ static int apple_magic_keyboard_backlight_led_set(struct led_classdev *led_cdev,
 	struct apple_magic_backlight *backlight = container_of(led_cdev,
 			struct apple_magic_backlight, cdev);
 
-	/*
-	 * We can't update the brightness without turning it off and on again.
-	 * We also need to delay a little (13ms isn't enough, but 15ms is).
-	 */
-	ret = apple_magic_keyboard_backlight_set(backlight, 0, 0);
-	if (ret)
-		return ret;
-
-	msleep(15);
-	return apple_magic_keyboard_backlight_set(backlight, brightness, 0);
+	return apple_magic_keyboard_backlight_set(backlight, brightness, 1);
 }
 
 static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
