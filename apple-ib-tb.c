@@ -389,8 +389,16 @@ static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
 {
 			dev_err(tb_dev->log_dev,
 				"Enter kbd bl init");
+			dev_err(tb_dev->log_dev,
+				"tpd_handle.dev is at 0x%x", tb_dev->tpd_handle.dev);
 	int ret;
 	struct apple_magic_backlight *backlight;
+
+	if (tb_dev->tpd_handle.dev == NULL) {
+			dev_err(tb_dev->log_dev,
+				"tpd_handle.dev was null, skipping backlight stuff");
+		return 0;
+	}
 
 	switch(tb_dev->tpd_handle.dev->id.product) {
 		case 0x0340u: /* MacBookPro16,1/4 */
