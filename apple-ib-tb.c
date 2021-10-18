@@ -387,34 +387,8 @@ static int apple_magic_keyboard_backlight_led_set(struct led_classdev *led_cdev,
 
 static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
 {
-			dev_err(tb_dev->log_dev,
-				"Enter kbd bl init");
-			dev_err(tb_dev->log_dev,
-				"tpd_handle.dev is at 0x%x", tb_dev->tpd_handle.dev);
 	int ret;
 	struct apple_magic_backlight *backlight;
-
-	if (tb_dev->tpd_handle.dev == NULL) {
-			dev_err(tb_dev->log_dev,
-				"tpd_handle.dev was null, skipping backlight stuff");
-		return 0;
-	}
-
-	switch(tb_dev->tpd_handle.dev->id.product) {
-		case 0x0340u: /* MacBookPro16,1/4 */
-		case 0x027eu: /* MacBookPro16,2 */
-		case 0x027fu: /* MacBookPro16,3 */
-		case 0x0280u: /* MacBookAir9,1 */
-			dev_err(tb_dev->log_dev,
-				"Matched magic keyboard (id: 0x%x)\n", tb_dev->tpd_handle.dev->id.product);
-			break;
-		default:
-			dev_err(tb_dev->log_dev,
-				"No magic keyboard (id: 0x%x)\n", tb_dev->tpd_handle.dev->id.product);
-			return 0;
-	}
-			dev_err(tb_dev->log_dev,
-				"Continuing kbd bl init");
 
 	backlight = devm_kzalloc(tb_dev->log_dev, sizeof(*backlight), GFP_KERNEL);
 	if (!backlight)
@@ -427,9 +401,7 @@ static int apple_magic_keyboard_backlight_init(struct appletb_device *tb_dev)
 
 	ret = apple_magic_keyboard_backlight_set(backlight, 0, 0);
 	if (ret) {
-
-			dev_err(tb_dev->log_dev,
-				"failed to test turn off bl");
+			dev_err(tb_dev->log_dev, "Failed to initialise Magic Keyboard Backlight (%d)\n", ret);
 			kfree(backlight);
 		return ret;
 	}
@@ -1003,6 +975,21 @@ static int appletb_inp_connect(struct input_handler *handler,
 	if (id->driver_info == APPLETB_DEVID_KEYBOARD) {
 		handle = &tb_dev->kbd_handle;
 		handle->name = "tbkbd";
+
+		dev_err(tb_dev->log_dev,"The next line of code accesses dev->id.product, here we go...\n");
+		switch(dev->id.product) {
+			case 0x0340u: /* MacBookPro16,1/4 */
+			case 0x027eu: /* MacBookPro16,2 */
+			case 0x027fu: /* MacBookPro16,3 */
+			case 0x0280u: /* MacBookAir9,1 */
+				dev_err(tb_dev->log_dev,
+					"Matched magic keyboard (id: 0x%x)\n", dev->id.product);
+				apple_magic_keyboard_backlight_init(tb_dev);
+				break;
+			default:
+				dev_err(tb_dev->log_dev,"No magic keyboard (id: 0x%x)\n", dev->id.product);
+				break;
+		}
 	} else if (id->driver_info == APPLETB_DEVID_TOUCHPAD) {
 		handle = &tb_dev->tpd_handle;
 		handle->name = "tbtpad";
@@ -1346,11 +1333,6 @@ static int appletb_probe(struct hid_device *hdev,
 		dev_dbg(tb_dev->log_dev, "Touchbar activated\n");
 
 
-		rc = apple_magic_keyboard_backlight_init(tb_dev);
-		if (rc) {
-			dev_err(tb_dev->log_dev,
-				"Failed to initialise magic keyboard backlight (%d)\n", rc);
-		}
 	}
 
 	return 0;
