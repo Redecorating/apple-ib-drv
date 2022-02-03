@@ -27,6 +27,7 @@
 #define dev_fmt(fmt) "tb: " fmt
 
 #include <linux/device.h>
+#include <linux/dmi.h>
 #include <linux/hid.h>
 #include <linux/input.h>
 #include <linux/jiffies.h>
@@ -233,6 +234,35 @@ struct apple_magic_keyboard_backlight_power_report {
 	u8 magic_1;	/* If these are non-zero, we are ignored. */
 	u8 magic_2;
 };
+
+static const struct dmi_system_id macs_with_magic_backlight[] = {
+	{
+		 .matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,1"),
+		},
+	},
+	{
+		 .matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,2"),
+		},
+	},
+	{
+		 .matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,3"),
+		},
+	},
+	{
+		 .matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,4"),
+		},
+	},
+	{ }
+};
+
 static struct appletb_device *appletb_dev;
 
 static int appletb_send_usb_ctrl(struct appletb_iface_info *iface_info,
@@ -1039,17 +1069,15 @@ static int appletb_inp_connect(struct input_handler *handler,
 {
 	struct appletb_device *tb_dev = handler->private;
 	struct input_handle *handle;
+	const struct dmi_system_id *dmi_id;
 	int rc;
 
 	if (id->driver_info == APPLETB_DEVID_KEYBOARD) {
 		handle = &tb_dev->kbd_handle;
 		handle->name = "tbkbd";
-		switch (dev->id.product) {
-		case 0x0340u: /* MacBookPro16,1/4 */
-		case 0x027eu: /* MacBookPro16,2 */
-		case 0x027fu: /* MacBookPro16,3 */
+		dmi_id = dmi_first_match(macs_with_magic_backlight);
+		if (dmi_id) {
 			apple_magic_keyboard_backlight_init(tb_dev);
-			break;
 		}
 	} else if (id->driver_info == APPLETB_DEVID_TOUCHPAD) {
 		handle = &tb_dev->tpd_handle;
