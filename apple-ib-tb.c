@@ -6,8 +6,8 @@
  */
 
 /*
- * Recent MacBookPro models (13,[23] and 14,[23]) have a touch bar, which
- * is exposed via several USB interfaces. MacOS supports a fancy mode
+ * Recent MacBookPro models (MacBookPro 13,[23] and later) have a touch bar,
+ * which is exposed via several USB interfaces. MacOS supports a fancy mode
  * where arbitrary buttons can be defined; this driver currently only
  * supports the simple mode that consists of 3 predefined layouts
  * (escape-only, esc + special keys, and esc + function keys).
@@ -32,7 +32,6 @@
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -41,6 +40,7 @@
 #include <linux/usb.h>
 #include <linux/workqueue.h>
 
+#include "hid-ids.h"
 #include "apple-ibridge.h"
 
 #define HID_UP_APPLE		0xff120000
@@ -78,10 +78,12 @@
 
 #define APPLE_MAGIC_KBD_BL_MAX	60
 
+#define APPLETB_FEATURE_IS_T1	BIT(0)
+
 static int appletb_tb_def_idle_timeout = 5 * 60;
 module_param_named(idle_timeout, appletb_tb_def_idle_timeout, int, 0444);
 MODULE_PARM_DESC(idle_timeout, "Default touch bar idle timeout:\n"
-			       "    >0 - turn touch bar display off after no keyboard, trackpad, or touch bar input has been received for this many seconds;\n"
+			       "    [>0] - turn touch bar display off after no keyboard, trackpad, or touch bar input has been received for this many seconds;\n"
 			       "         the display will be turned back on as soon as new input is received\n"
 			       "     0 - turn touch bar display off (input does not turn it on again)\n"
 			       "    -1 - turn touch bar display on (does not turn off automatically)\n"
@@ -125,14 +127,10 @@ static ssize_t fnmode_store(struct device *dev, struct device_attribute *attr,
 			    const char *buf, size_t size);
 static DEVICE_ATTR_RW(fnmode);
 
-static bool use_correct_report = false;
-static DEVICE_BOOL_ATTR(alt, 0644, use_correct_report);
-
 static struct attribute *appletb_attrs[] = {
 	&dev_attr_idle_timeout.attr,
 	&dev_attr_dim_timeout.attr,
 	&dev_attr_fnmode.attr,
-	&dev_attr_alt.attr.attr,
 	NULL,
 };
 
@@ -184,7 +182,7 @@ struct appletb_device {
 	bool			dim_to_is_calc;
 	int			fn_mode;
 
-	bool			is_t2;
+	bool			is_t1;
 
 	struct apple_magic_backlight kbd_backlight;
 };
@@ -233,6 +231,7 @@ struct apple_magic_keyboard_backlight_power_report {
 	u8 magic_1;	/* If these are non-zero, we are ignored. */
 	u8 magic_2;
 };
+
 static struct appletb_device *appletb_dev;
 
 static int appletb_send_usb_ctrl(struct appletb_iface_info *iface_info,
@@ -274,7 +273,7 @@ static bool appletb_disable_autopm(struct hid_device *hdev)
 
 /*
  * While the mode functionality is listed as a valid hid report in the usb
- * interface descriptor, it's not sent that way. Instead it's sent with
+ * interface descriptor, on a T1 it's not sent that way. Instead it's sent with
  * different request-type and without a leading report-id in the data. Hence
  * we need to send it as a custom usb control message rather via any of the
  * standard hid_hw_*request() functions.
@@ -292,27 +291,27 @@ static int appletb_set_tb_mode(struct appletb_device *tb_dev,
 
 	report = tb_dev->mode_field->report;
 
-	if (tb_dev->is_t2) {
-		char data[] = { use_correct_report ? report->id : 0, mode };
-		buf = kmemdup(data, sizeof(data), GFP_KERNEL);
-	} else {
+	if (tb_dev->is_t1) {
 		buf = kmemdup(&mode, 1, GFP_KERNEL);
+	} else {
+		char data[] = { report->id, mode };
+		buf = kmemdup(data, sizeof(data), GFP_KERNEL);
 	}
 	if (!buf)
 		return -ENOMEM;
 
 	autopm_off = appletb_disable_autopm(tb_dev->mode_iface.hdev);
 
-	if (tb_dev->is_t2)
-		rc = appletb_send_usb_ctrl(&tb_dev->mode_iface,
-					   USB_DIR_OUT | USB_TYPE_CLASS |
-					   USB_RECIP_INTERFACE,
-					   report, buf, 2);
-	else
+	if (tb_dev->is_t1)
 		rc = appletb_send_usb_ctrl(&tb_dev->mode_iface,
 					   USB_DIR_OUT | USB_TYPE_VENDOR |
 					   USB_RECIP_DEVICE,
 					   report, buf, 1);
+	else
+		rc = appletb_send_usb_ctrl(&tb_dev->mode_iface,
+					   USB_DIR_OUT | USB_TYPE_CLASS |
+					   USB_RECIP_INTERFACE,
+					   report, buf, 2);
 	if (rc < 0)
 		dev_err(tb_dev->log_dev,
 			"Failed to set touch bar mode to %u (%d)\n", mode, rc);
@@ -1025,7 +1024,6 @@ static struct usb_interface *appletb_get_usb_iface(struct hid_device *hdev)
 {
 	struct device *dev = &hdev->dev;
 
-	/* in kernel: dev && !is_usb_interface(dev) */
 	while (dev && !(dev->type && dev->type->name &&
 			!strcmp(dev->type->name, "usb_interface")))
 		dev = dev->parent;
@@ -1146,6 +1144,70 @@ appletb_get_iface_info(struct appletb_device *tb_dev, struct hid_device *hdev)
 	return NULL;
 }
 
+/**
+ * appletb_find_report_field() - Find the field in the report with the given
+ * usage.
+ * @report: the report to search
+ * @field_usage: the usage of the field to search for
+ *
+ * Returns: the hid field if found, or NULL if none found.
+ */
+static struct hid_field *appletb_find_report_field(struct hid_report *report,
+						   unsigned int field_usage)
+{
+	int f, u;
+
+	for (f = 0; f < report->maxfield; f++) {
+		struct hid_field *field = report->field[f];
+
+		if (field->logical == field_usage)
+			return field;
+
+		for (u = 0; u < field->maxusage; u++) {
+			if (field->usage[u].hid == field_usage)
+				return field;
+		}
+	}
+
+	return NULL;
+}
+
+/**
+ * appletb_find_hid_field() - Search all the reports of the device for the
+ * field with the given usage.
+ * @hdev: the device whose reports to search
+ * @application: the usage of application collection that the field must
+ *               belong to
+ * @field_usage: the usage of the field to search for
+ *
+ * Returns: the hid field if found, or NULL if none found.
+ */
+static struct hid_field *appletb_find_hid_field(struct hid_device *hdev,
+						unsigned int application,
+						unsigned int field_usage)
+{
+	static const int report_types[] = { HID_INPUT_REPORT, HID_OUTPUT_REPORT,
+					    HID_FEATURE_REPORT };
+	struct hid_report *report;
+	struct hid_field *field;
+	int t;
+
+	for (t = 0; t < ARRAY_SIZE(report_types); t++) {
+		struct list_head *report_list =
+			    &hdev->report_enum[report_types[t]].report_list;
+		list_for_each_entry(report, report_list, list) {
+			if (report->application != application)
+				continue;
+
+			field = appletb_find_report_field(report, field_usage);
+			if (field)
+				return field;
+		}
+	}
+
+	return NULL;
+}
+
 static int appletb_extract_report_and_iface_info(struct appletb_device *tb_dev,
 						 struct hid_device *hdev,
 						 const struct hid_device_id *id)
@@ -1154,13 +1216,13 @@ static int appletb_extract_report_and_iface_info(struct appletb_device *tb_dev,
 	struct usb_interface *usb_iface;
 	struct hid_field *field;
 
-	field = appleib_find_hid_field(hdev, HID_GD_KEYBOARD, HID_USAGE_MODE);
+	field = appletb_find_hid_field(hdev, HID_GD_KEYBOARD, HID_USAGE_MODE);
 	if (field) {
 		iface_info = &tb_dev->mode_iface;
 		tb_dev->mode_field = field;
-		tb_dev->is_t2 = id->driver_data;
+		tb_dev->is_t1 = !!(id->driver_data & APPLETB_FEATURE_IS_T1);
 	} else {
-		field = appleib_find_hid_field(hdev, HID_USAGE_APPLE_APP,
+		field = appletb_find_hid_field(hdev, HID_USAGE_APPLE_APP,
 					       HID_USAGE_DISP);
 		if (!field)
 			return 0;
@@ -1168,7 +1230,7 @@ static int appletb_extract_report_and_iface_info(struct appletb_device *tb_dev,
 		iface_info = &tb_dev->disp_iface;
 		tb_dev->disp_field = field;
 		tb_dev->disp_field_aux1 =
-			appleib_find_hid_field(hdev, HID_USAGE_APPLE_APP,
+			appletb_find_hid_field(hdev, HID_USAGE_APPLE_APP,
 					       HID_USAGE_DISP_AUX1);
 
 		if (!tb_dev->disp_field_aux1 ||
@@ -1567,18 +1629,21 @@ static void appletb_free_device(struct appletb_device *tb_dev)
 }
 
 static const struct hid_device_id appletb_hid_ids[] = {
+	/* MacBook Pro's 2016, 2017, with T1 chip */
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LINUX_FOUNDATION,
-			 USB_DEVICE_ID_IBRIDGE_TB) },
-	{ HID_USB_DEVICE(/* USB_VENDOR_ID_APPLE */ 0x05ac, 0x8102) },
-	{ HID_USB_DEVICE(/* USB_VENDOR_ID_APPLE */ 0x05ac, 0x8302),
-	  .driver_data = 1 },
+			 USB_DEVICE_ID_IBRIDGE_TB),
+	  .driver_data = APPLETB_FEATURE_IS_T1 },
+	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge DFR brightness */
+	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, 0x8102) },
+	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge Display */
+	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, 0x8302) },
 	{ },
 };
 
 MODULE_DEVICE_TABLE(hid, appletb_hid_ids);
 
 static struct hid_driver appletb_hid_driver = {
-	.name = "apple-ib-touchbar",
+	.name = "apple-touchbar",
 	.id_table = appletb_hid_ids,
 	.probe = appletb_probe,
 	.remove = appletb_remove,
